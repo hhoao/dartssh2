@@ -80,5 +80,28 @@ void main() {
 
       expect(pingCount, equals(2));
     });
+
+    test('routes ping errors to onPingFailed', () async {
+      final failures = <Object>[];
+      final completer = Completer<void>();
+
+      final keepAlive = SSHKeepAlive(
+        interval: const Duration(milliseconds: 10),
+        ping: () async {
+          throw Exception('dead transport');
+        },
+        onPingFailed: (error, _) {
+          failures.add(error);
+          if (!completer.isCompleted) completer.complete();
+        },
+      );
+
+      keepAlive.start();
+      await completer.future;
+      keepAlive.stop();
+
+      expect(failures, isNotEmpty);
+      expect(failures.first.toString(), contains('dead transport'));
+    });
   });
 }

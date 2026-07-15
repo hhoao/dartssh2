@@ -9,11 +9,16 @@ class SSHKeepAlive {
 
   final Future Function() ping;
 
+  /// Optional hook when [ping] fails (e.g. connection dropped). Used by the
+  /// app layer for liveness/reconnect — not for silencing errors.
+  final void Function(Object error, StackTrace stackTrace)? onPingFailed;
+
   bool _isPinging = false;
 
   SSHKeepAlive({
     required this.ping,
     this.interval = const Duration(seconds: 10),
+    this.onPingFailed,
   });
 
   void start() {
@@ -22,8 +27,8 @@ class SSHKeepAlive {
       _isPinging = true;
       try {
         await ping();
-      } catch (_) {
-        // Ignore errors, the client transport will handle disconnection.
+      } catch (error, stackTrace) {
+        onPingFailed?.call(error, stackTrace);
       } finally {
         _isPinging = false;
       }

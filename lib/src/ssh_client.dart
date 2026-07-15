@@ -229,6 +229,9 @@ class SSHClient {
   /// method. Set this to null to disable automatic keep-alive messages.
   final Duration? keepAliveInterval;
 
+  /// Called when an automatic keep-alive [ping] fails.
+  final void Function(Object error, StackTrace stackTrace)? onKeepAliveFailed;
+
   /// Maximum time to wait for the SSH transport handshake to complete.
   final Duration? handshakeTimeout;
 
@@ -298,6 +301,7 @@ class SSHClient {
     this.onX11Forward,
     this.agentHandler,
     this.keepAliveInterval = const Duration(seconds: 10),
+    this.onKeepAliveFailed,
     this.handshakeTimeout,
     this.authTimeout,
     this.disableHostkeyVerification = false,
@@ -399,7 +403,11 @@ class SSHClient {
   final _remoteForwards = <SSHRemoteForward>{};
 
   late final _keepAlive = keepAliveInterval != null
-      ? SSHKeepAlive(ping: ping, interval: keepAliveInterval!)
+      ? SSHKeepAlive(
+          ping: ping,
+          interval: keepAliveInterval!,
+          onPingFailed: onKeepAliveFailed,
+        )
       : null;
 
   SSHAuthMethod? _currentAuthMethod;
@@ -1867,12 +1875,19 @@ class SSHRemoteForward {
   final SSHClient _client;
 
   final _connections = StreamController<SSHForwardChannel>();
+  var _closed = false;
 
   Stream<SSHForwardChannel> get connections => _connections.stream;
 
-  void close() {
-    _connections.close();
-    _client.cancelForwardRemote(this);
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    await _connections.close();
+    try {
+      await _client.cancelForwardRemote(this);
+    } on Object {
+      // Client may already be closing.
+    }
   }
 
   @override

@@ -495,43 +495,49 @@ class SSHChannelController {
   }
 
   late final _uploadLoop = OnceSimultaneously(() async {
-    while (true) {
-      if (_remoteWindow <= 0) {
-        return;
-      }
-
-      final dataToRead = min(_remoteWindow, remoteMaximumPacketSize);
-      final data = await _locaStreamConsumer.read(dataToRead);
-
-      if (data == null) {
-        _sendEOFIfNeeded();
-
-        if (_remoteStream.isClosed) {
-          close();
+    try {
+      while (true) {
+        if (_remoteWindow <= 0) {
+          return;
         }
-        return;
+
+        final dataToRead = min(_remoteWindow, remoteMaximumPacketSize);
+        final data = await _locaStreamConsumer.read(dataToRead);
+
+        if (data == null) {
+          _sendEOFIfNeeded();
+
+          if (_remoteStream.isClosed) {
+            close();
+          }
+          return;
+        }
+
+        if (_hasSentEOF) {
+          return;
+        }
+
+        printDebug?.call('SSHChannel._uploadLoop: len=${data.bytes.length}');
+
+        final message = data.isExtendedData
+            ? SSH_Message_Channel_Extended_Data(
+                recipientChannel: remoteId,
+                dataTypeCode: data.type!,
+                data: data.bytes,
+              )
+            : SSH_Message_Channel_Data(
+                recipientChannel: remoteId,
+                data: data.bytes,
+              );
+
+        sendMessage(message);
+
+        _remoteWindow -= data.bytes.length;
       }
-
-      if (_hasSentEOF) {
-        return;
-      }
-
-      printDebug?.call('SSHChannel._uploadLoop: len=${data.bytes.length}');
-
-      final message = data.isExtendedData
-          ? SSH_Message_Channel_Extended_Data(
-              recipientChannel: remoteId,
-              dataTypeCode: data.type!,
-              data: data.bytes,
-            )
-          : SSH_Message_Channel_Data(
-              recipientChannel: remoteId,
-              data: data.bytes,
-            );
-
-      sendMessage(message);
-
-      _remoteWindow -= data.bytes.length;
+    } catch (e) {
+      // Transport may already be torn down (remote close / host dispose) while
+      // this unawaited loop still has buffered channel data to send.
+      printDebug?.call('SSHChannelController._uploadLoop - error: $e');
     }
   });
 

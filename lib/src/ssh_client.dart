@@ -20,6 +20,7 @@ import 'package:dartssh2/src/utils/auth_methods.dart';
 import 'package:dartssh2/src/utils/pending_requests.dart';
 import 'package:dartssh2/src/utils/terminal_state.dart';
 import 'package:dartssh2/src/message/msg_channel.dart';
+import 'package:dartssh2/src/message/msg_disconnect.dart';
 import 'package:dartssh2/src/message/msg_request.dart';
 import 'package:dartssh2/src/message/msg_service.dart';
 import 'package:dartssh2/src/message/msg_userauth.dart';
@@ -908,6 +909,24 @@ class SSHClient {
     _terminatePendingOperations(error);
     _closeChannels(error);
     await _transport.close();
+  }
+
+  /// Sends `SSH_MSG_DISCONNECT` (BY_APPLICATION) and then closes, so the peer
+  /// sees a protocol-level disconnect instead of inferring the teardown from
+  /// TCP alone. Fire-and-forget safe: a transport that already died falls
+  /// through to [close].
+  Future<void> disconnect() async {
+    try {
+      if (!_transport.isClosed) {
+        _sendMessage(
+          SSH_Message_Disconnect.fromReason(SSHDisconnectReason.byApplication),
+        );
+        await _transport.flush();
+      }
+    } on Object {
+      // The transport may already be tearing down; the close below is enough.
+    }
+    await close();
   }
 
   /// Force flush any buffered outgoing data to the socket.

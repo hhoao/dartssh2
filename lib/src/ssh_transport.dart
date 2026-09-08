@@ -83,6 +83,13 @@ class SSHTransport {
   /// Whether the transport acts as a server.
   final bool isServer;
 
+  /// Private key used to sign the exchange hash when [isServer] is true.
+  ///
+  /// Required for a server to complete the key exchange; a server that
+  /// receives a key exchange init without one fails the exchange with an
+  /// [SSHStateError]. Ignored when [isServer] is false.
+  final SSHKeyPair? hostKeyPair;
+
   /// Whether the transport acts as a client. This is equal to `!isServer`.
   bool get isClient => !isServer;
 
@@ -142,6 +149,7 @@ class SSHTransport {
   SSHTransport(
     this.socket, {
     this.isServer = false,
+    this.hostKeyPair,
     this.version = 'DartSSH_2.0',
     this.printDebug,
     this.printTrace,
@@ -1580,6 +1588,9 @@ class SSHTransport {
         return;
       case SSH_Message_KexInit.messageId:
         return _handleMessageKexInit(message);
+      case SSH_Message_KexECDH_Init.messageId:
+        if (isServer) return _handleMessageKexEcdhInit(message);
+        throw SSHStateError('Unexpected KEXDH_INIT');
       case SSH_Message_KexDH_Reply.messageId:
       case SSH_Message_KexDH_GexReply.messageId:
         return _handleMessageKexReply(message);
@@ -1945,6 +1956,58 @@ class SSHTransport {
     _kex =
         await SSHKexDH.createAsync(p: message.p, g: message.g, secretBits: 256);
     _sendKexDHGexInit();
+  }
+
+  /// Server side of the elliptic-curve key exchange (RFC 5656 §4, RFC 8731
+  /// for curve25519): compute the shared secret from the client's ephemeral
+  /// public key, sign the exchange hash with the host key, and answer
+  /// KEX_ECDH_REPLY followed by NEWKEYS.
+  Future<void> _handleMessageKexEcdhInit(Uint8List payload) async {
+    printDebug?.call('SSHTransport._handleMessageKexEcdhInit');
+    if (!isServer) throw SSHStateError('Unexpected KEXDH_INIT');
+
+    final kex = _kex;
+    if (kex is! SSHKexECDH) {
+      throw SSHStateError('No ECDH key exchange algorithm negotiated');
+    }
+    final hostKeyPair = this.hostKeyPair;
+    if (hostKeyPair == null) {
+      throw SSHStateError('Server transport requires a hostKeyPair');
+    }
+
+    final message = SSH_Message_KexECDH_Init.decode(payload);
+    printTrace?.call('<- $socket: $message');
+    final sharedSecret = kex.computeSecret(message.ecdhPublicKey);
+
+    final hostPublicKey = hostKeyPair.toPublicKey().encode();
+    final exchangeHash = SSHKexUtils.computeExchangeHash(
+      digest: _kexType!.createDigest(),
+      clientVersion: _remoteVersion!,
+      serverVersion: _localVersion,
+      clientKexInit: _remoteKexInit,
+      serverKexInit: _localKexInit,
+      hostKey: hostPublicKey,
+      clientPublicKey: message.ecdhPublicKey,
+      serverPublicKey: kex.publicKey,
+      sharedSecret: sharedSecret,
+    );
+
+    _exchangeHash = exchangeHash;
+    _sessionId ??= exchangeHash;
+    _sharedSecret = sharedSecret;
+
+    sendPacket(
+      SSH_Message_KexECDH_Reply(
+        hostPublicKey: hostPublicKey,
+        ecdhPublicKey: kex.publicKey,
+        signature: hostKeyPair.sign(exchangeHash).encode(),
+      ).encode(),
+    );
+    printTrace?.call('-> $socket: SSH_Message_KexECDH_Reply');
+
+    _sendNewKeys();
+    _applyLocalKeys();
+    onReady?.call();
   }
 
   /// Handles the NEWKEYS message, activating the remote decryption keys and flushing queued packets.

@@ -29,3 +29,8 @@ export 'src/message/msg_request.dart';
 export 'src/message/msg_service.dart';
 export 'src/message/msg_unimplemented.dart';
 export 'src/message/msg_userauth.dart';
+export 'src/sftp/sftp_file_attrs.dart';
+export 'src/sftp/sftp_file_open_mode.dart';
+export 'src/sftp/sftp_name.dart';
+export 'src/sftp/sftp_packet.dart';
+export 'src/sftp/sftp_status_code.dart';

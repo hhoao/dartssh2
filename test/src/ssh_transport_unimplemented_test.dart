@@ -10,6 +10,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:dartssh2/src/message/msg_debug.dart';
 import 'package:dartssh2/src/message/msg_disconnect.dart';
 import 'package:dartssh2/src/message/msg_ignore.dart';
+import 'package:dartssh2/src/message/msg_kex.dart';
 import 'package:dartssh2/src/message/msg_unimplemented.dart';
 import 'package:dartssh2/src/ssh_packet.dart';
 import 'package:test/test.dart';
@@ -73,6 +74,21 @@ void main() {
 
   SSH_Message_Unimplemented sentUnimplemented(Uint8List packet) {
     return SSH_Message_Unimplemented.decode(packetPayload(packet));
+  }
+
+  /// Prepares the key-derivation state an incoming NEWKEYS needs, so a test
+  /// can complete a simulated exchange round.
+  void prepareAppliedKeys(SSHTransport transport) {
+    setPrivate(transport, '_kexType', SSHKexType.x25519);
+    setPrivate(transport, '_sharedSecret', BigInt.from(42));
+    setPrivate(transport, '_exchangeHash',
+        Uint8List.fromList(List<int>.filled(32, 1)));
+    setPrivate(
+        transport, '_sessionId', Uint8List.fromList(List<int>.filled(32, 2)));
+    setPrivate(transport, '_clientCipherType', SSHCipherType.aes128ctr);
+    setPrivate(transport, '_serverCipherType', SSHCipherType.aes128ctr);
+    setPrivate(transport, '_clientMacType', SSHMacType.hmacSha256);
+    setPrivate(transport, '_serverMacType', SSHMacType.hmacSha256);
   }
 
   group('SSH_MSG_UNIMPLEMENTED encoding', () {
@@ -269,16 +285,29 @@ void main() {
       await transport.close();
     });
 
-    test('replies to an unknown message during a strict rekey', () async {
+    test('replies to an unknown message during a strict rekey after NEWKEYS',
+        () async {
       final socket = _CaptureSSHSocket();
       final transport = SSHTransport(socket, onMessage: (_) => false);
       socket.packets.clear();
       setPrivate(transport, '_strictKex', true);
       setPrivate(transport, '_isFirstKex', false);
       setPrivate(transport, '_kexInProgress', true);
+      setPrivate(transport, '_sentNewKeys', true);
       setSequenceValue(transport, 9);
+      prepareAppliedKeys(transport);
 
+      // The unknown message rides out the exchange window (rekey queueing):
+      // nothing is answered while the exchange is still running.
       await invokeHandleMessage(transport, Uint8List.fromList([255]));
+      expect(socket.packets, isEmpty);
+
+      // Once NEWKEYS completes the rekey, the replayed message is answered
+      // UNIMPLEMENTED with its original receive sequence number.
+      await invokeHandleMessage(
+        transport,
+        SSH_Message_NewKeys().encode(),
+      );
 
       expect(socket.packets, hasLength(1));
       expect(sentUnimplemented(socket.packets.single).sequenceNumber, 9);

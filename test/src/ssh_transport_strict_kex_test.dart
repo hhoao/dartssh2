@@ -448,7 +448,10 @@ void main() {
 
   group('Strict key exchange sequence numbers', () {
     /// Prepares the state [_applyRemoteKeys] needs so a NEWKEYS can be handled.
+    /// The fixture simulates the point where our own NEWKEYS is already out,
+    /// so the incoming one is the exchange-completing peer NEWKEYS.
     void prepareKeys(SSHTransport transport) {
+      setPrivate(transport, '_kexInProgress', true);
       setPrivate(transport, '_kexType', SSHKexType.x25519);
       setPrivate(transport, '_sharedSecret', BigInt.from(42));
       setPrivate(transport, '_exchangeHash',
@@ -459,6 +462,7 @@ void main() {
       setPrivate(transport, '_serverCipherType', SSHCipherType.aes128ctr);
       setPrivate(transport, '_clientMacType', SSHMacType.hmacSha256);
       setPrivate(transport, '_serverMacType', SSHMacType.hmacSha256);
+      setPrivate(transport, '_sentNewKeys', true);
     }
 
     test('local sequence number resets after sending NEWKEYS', () {

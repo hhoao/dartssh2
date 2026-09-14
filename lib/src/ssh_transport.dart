@@ -327,6 +327,17 @@ class SSHTransport {
   /// exchange round. This is reset when the exchange finishes.
   bool _sentKexInit = false;
 
+  /// Whether we have already received the peer's SSH_MSG_KEXINIT for the
+  /// ongoing key exchange round. A KEXINIT arriving while this is `true` is
+  /// a duplicate: the exchange is already negotiating on the first one, so
+  /// the duplicate is rejected instead of merged into it.
+  bool _receivedKexInit = false;
+
+  /// Whether we have already sent our SSH_MSG_NEWKEYS for the ongoing key
+  /// exchange round. An incoming NEWKEYS is only valid after our own went
+  /// out — anything else is unsolicited and must not be adopted.
+  bool _sentNewKeys = false;
+
   /// Whether the initial key exchange is still running. The strict key exchange
   /// and EXT_INFO indicators are only valid in the first SSH_MSG_KEXINIT, so
   /// they are advertised and read while this is `true`.
@@ -361,6 +372,21 @@ class SSHTransport {
 
   /// Packets queued during key exchange that will be sent after NEW_KEYS
   final List<Uint8List> _rekeyPendingPackets = [];
+
+  /// Incoming non-KEX messages that arrived while a *re-key* exchange was in
+  /// progress, to be re-dispatched once NEWKEYS applied the new keys.
+  ///
+  /// The symmetric twin of [_rekeyPendingPackets]: OpenSSH keeps dispatching
+  /// messages with ids >= 50 through a rekey (`kex_reset_dispatch` only
+  /// guards the transport range 1-49, kex.c) while queueing everything it
+  /// sends (packet.c:ssh_packet_send2: "During rekeying we can only send key
+  /// exchange messages. Queue everything else."). A packet the peer sent
+  /// before our KEXINIT reached it can land inside the exchange window;
+  /// dropping it (the old `_handleUnexpectedKexMessage` answer) hangs
+  /// channels whose teardown raced the rekey. Only rekeys queue: during the
+  /// initial exchange OpenSSH answers everything through
+  /// `dispatch_protocol_error`, and so does the transport.
+  final List<Uint8List> _rekeyPendingInboundPackets = [];
 
   /// Completes when the key exchange a [rekey] call is waiting on reaches
   /// SSH_MSG_NEWKEYS, or with an error if the connection ends first.
@@ -754,6 +780,22 @@ class SSHTransport {
       final versionString = bufferString.substring(0, index);
 
       if (!versionString.startsWith('SSH-')) {
+        if (isServer) {
+          // A client has no RFC 4253 §4.2 licence to send preamble lines:
+          // sshd treats any non-'SSH-' line from a client as fatal, answers
+          // with the plaintext error line and closes
+          // (kex.c:kex_exchange_identification, server branch). The
+          // client-side tolerance below stays: servers MAY send comments.
+          socket.sink.add(
+            latin1.encode('Invalid SSH identification string.\r\n'),
+          );
+          // The error line must reach the peer before the teardown destroys
+          // the socket, exactly like the strict-kex DISCONNECT.
+          _pendingDisconnectFlush = socket.flush();
+          throw SSHHandshakeError(
+            'Client sent invalid protocol identifier: "$versionString"',
+          );
+        }
         // A pre-banner line: discard it and keep looking for the
         // identification line.
         _preBannerLines++;
@@ -1538,6 +1580,7 @@ class SSHTransport {
   /// to the server should be encrypted with the keys negotiated in key exchange.
   void _sendNewKeys() {
     printDebug?.call('SSHTransport._sendNewKeys');
+    _sentNewKeys = true;
     final message = SSH_Message_NewKeys();
     printTrace?.call('-> $socket: $message');
     sendPacket(message.encode());
@@ -1612,6 +1655,14 @@ class SSHTransport {
         return _handleMessageExtInfo(message);
       default:
         if (_kexInProgress) {
+          if (!_isFirstKex && messageId >= 50) {
+            // A session message racing into a re-key's exchange window:
+            // queue it and re-dispatch after NEWKEYS, the incoming twin of
+            // the [_rekeyPendingPackets] send queue. See
+            // [_rekeyPendingInboundPackets] for the OpenSSH reference.
+            _rekeyPendingInboundPackets.add(Uint8List.fromList(message));
+            return;
+          }
           return _handleUnexpectedKexMessage(messageId);
         }
 
@@ -1747,6 +1798,19 @@ class SSHTransport {
   Future<void> _handleMessageKexInit(Uint8List payload) async {
     printDebug?.call('SSHTransport._handleMessageKexInit');
 
+    // A KEXINIT that arrives while an exchange is already running on a
+    // previously received KEXINIT is a duplicate: sshd re-registers KEXINIT
+    // to kex_protocol_error for the duration of the exchange
+    // (kex.c:kex_input_kexinit), so the duplicate draws UNIMPLEMENTED (fatal
+    // under the initial strict exchange) and the in-flight negotiation is
+    // untouched. Merging it instead would overwrite the recorded peer
+    // KEXINIT and replace the ephemeral kex, desynchronizing the exchange
+    // hashes until the peer's verification of the reply fails.
+    if (_kexInProgress && _receivedKexInit) {
+      _handleUnexpectedKexMessage(SSH_Message_KexInit.messageId);
+      return;
+    }
+
     // If this message initiates a new key-exchange round from the remote
     // side, we MUST respond with our own KEXINIT (RFC 4253 §7.1).
     if (!_kexInProgress) {
@@ -1762,6 +1826,7 @@ class SSHTransport {
     final message = SSH_Message_KexInit.decode(payload);
     printTrace?.call('<- $socket: $message');
     _remoteKexInit = payload;
+    _receivedKexInit = true;
 
     if (_isFirstKex) {
       _negotiateStrictKex(message);
@@ -2059,6 +2124,20 @@ class SSHTransport {
   /// Handles the NEWKEYS message, activating the remote decryption keys and flushing queued packets.
   Future<void> _handleMessageNewKeys(Uint8List message) async {
     printDebug?.call('SSHTransport._handleMessageNewKeys');
+
+    // An unsolicited NEWKEYS must not be adopted: sshd leaves NEWKEYS
+    // dispatched to kex_protocol_error outside a completed exchange
+    // (kex.c:kex_input_newkeys), so it draws UNIMPLEMENTED there. Adopting
+    // it would re-derive keys from a stale (or absent) exchange hash, end
+    // the exchange state and reset the strict-kex receive sequence number,
+    // after which the peer's real kex message hits a kex-null state error
+    // and the connection dies.
+    if (!_kexInProgress || !_sentNewKeys) {
+      printTrace?.call('<- $socket: SSH_Message_NewKeys (unsolicited)');
+      _handleUnexpectedKexMessage(SSH_Message_NewKeys.messageId);
+      return;
+    }
+
     printTrace?.call('<- $socket: SSH_Message_NewKeys');
 
     _applyRemoteKeys();
@@ -2066,6 +2145,8 @@ class SSHTransport {
     // Key exchange round finished.
     _kexInProgress = false;
     _sentKexInit = false;
+    _receivedKexInit = false;
+    _sentNewKeys = false;
     _isFirstKex = false;
     _kex = null;
 
@@ -2081,6 +2162,15 @@ class SSHTransport {
     _rekeyPendingPackets.clear();
     for (final packet in pending) {
       sendPacket(packet);
+    }
+
+    // Re-dispatch the non-KEX messages that raced into the exchange window
+    // (see [_rekeyPendingInboundPackets]) — after the keys are applied and
+    // the queued outgoing traffic is flushed, in their arrival order.
+    final pendingInbound = List<Uint8List>.from(_rekeyPendingInboundPackets);
+    _rekeyPendingInboundPackets.clear();
+    for (final payload in pendingInbound) {
+      await _handleMessage(payload);
     }
 
     final rekeyCompleter = _rekeyCompleter;

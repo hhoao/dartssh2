@@ -30,21 +30,21 @@ void main() {
 
       expect(items, isNotEmpty);
       expect(items.any((item) => item.filename == '.'), isTrue);
-    });
+    }, skip: skipWithoutRebexServer);
   });
 
   group('SftpClient.statVFS', () {
     test('throws if the extension is not supported by the server', () async {
       final sftp = await client.sftp();
       expect(() => sftp.statvfs('/root'), throwsA(isA<SftpExtensionError>()));
-    });
+    }, skip: skipWithoutRebexServer);
   });
 
   group('SftpFile.statVFS', () {
     test('throws if the extension is not supported by the server', () async {
       final sftp = await client.sftp();
       expect(() => sftp.statvfs('/root/a'), throwsA(isA<SftpExtensionError>()));
-    });
+    }, skip: skipWithoutRebexServer);
   });
 
   group('SftpClient.download', () {
@@ -83,7 +83,7 @@ void main() {
           await outputFile.delete();
         }
       }
-    });
+    }, skip: skipWithoutRebexServer);
 
     test('supports offset and length for partial downloads', () async {
       final sftp = await client.sftp();
@@ -122,6 +122,6 @@ void main() {
           await outputFile.delete();
         }
       }
-    });
+    }, skip: skipWithoutRebexServer);
   });
 }

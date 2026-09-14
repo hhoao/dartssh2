@@ -17,7 +17,7 @@ void main() {
       var client = await getHoneypotClient();
       await client.authenticated;
       client.close();
-    });
+    }, skip: skipWithoutRebexServer);
 
     test('chacha20-poly1305 works against a ssh server', () async {
       final client = await getHoneypotClient(
@@ -27,7 +27,7 @@ void main() {
       );
       await client.authenticated;
       client.close();
-    });
+    }, skip: skipWithoutRebexServer);
 
     test('onVerifyHostKey is called with OpenSSH-style SHA256 fingerprint',
         () async {
@@ -57,7 +57,7 @@ void main() {
       final base64Part = hostkeyFingerprint!.substring(7);
       expect(base64Part.length, equals(43));
       expect(() => base64.decode('$base64Part='), returnsNormally);
-    });
+    }, skip: skipWithoutRebexServer);
 
     test('onVerifyHostKey returning false aborts connection', () async {
       var client = SSHClient(
@@ -78,7 +78,7 @@ void main() {
       } finally {
         client.close();
       }
-    });
+    }, skip: skipWithoutRebexServer);
 
     // test('throws SSHAuthFailError when password is wrong', () async {
     //   var client = SSHClient(
@@ -117,7 +117,7 @@ void main() {
       );
       await client.authenticated;
       client.close();
-    });
+    }, skip: skipWithoutRebexServer);
 
     test('hmacSha512Etm mac works', () async {
       var client = await getHoneypotClient(
@@ -125,7 +125,7 @@ void main() {
       );
       await client.authenticated;
       client.close();
-    });
+    }, skip: skipWithoutRebexServer);
 
     test('throws SSHAuthFailError when public key is wrong', () async {
       var client = SSHClient(
@@ -140,7 +140,7 @@ void main() {
         expect(e, isA<SSHAuthFailError>());
       }
       client.close();
-    });
+    }, skip: skipWithoutRebexServer);
 
     test('throws SSHAuthFailError when all public keys are wrong', () async {
       var client = SSHClient(
@@ -158,7 +158,7 @@ void main() {
         expect(e, isA<SSHAuthFailError>());
       }
       client.close();
-    });
+    }, skip: skipWithoutRebexServer);
 
     test(
       'throws SSHAuthFailError when both password and public key are wrong',
@@ -177,6 +177,7 @@ void main() {
         }
         client.close();
       },
+      skip: skipWithoutRebexServer,
     );
 
     test('throws SSHAuthFailError when identity is empty', () async {
@@ -192,7 +193,7 @@ void main() {
         expect(e, isA<SSHAuthFailError>());
       }
       client.close();
-    });
+    }, skip: skipWithoutRebexServer);
 
     test('throws SSHAuthAbortError when the handshake is aborted', () async {
       var client = SSHClient(
@@ -218,14 +219,14 @@ void main() {
       await client.authenticated;
       expect(client.remoteVersion, startsWith('SSH-2.0'));
       client.close();
-    });
+    }, skip: skipWithoutRebexServer);
   });
 
   group('SSHClient.ping', () {
     test('works', () async {
       final client = await getTestClient();
       await client.ping();
-    });
+    }, skip: skipWithoutRebexServer);
   });
 
   group('SSHClient.forwardDynamic', () {
@@ -244,7 +245,7 @@ void main() {
       expect(dynamicForward.isClosed, isTrue);
 
       client.close();
-    });
+    }, skip: skipWithoutRebexServer);
   });
 
   group('SSHClient.runWithResult', () {
@@ -262,7 +263,7 @@ void main() {
       expect(result.exitSignal, isNull);
 
       client.close();
-    });
+    }, skip: skipWithoutRebexServer);
 
     test('returns non-zero exit code for failing command', () async {
       final client = await getTestClient();
@@ -276,14 +277,13 @@ void main() {
       expect(result.exitSignal, isNull);
 
       client.close();
-    });
+    }, skip: skipWithoutRebexServer);
   });
 
   group('SSHClient.flush', () {
     test('can flush client, session, channel, and forward channel', () async {
       final client = await getTestClient();
       await client.authenticated;
-
       await client.flush();
 
       final session = await client.execute('echo flush_test');
@@ -304,6 +304,6 @@ void main() {
 
       await session.done;
       client.close();
-    });
+    }, skip: skipWithoutRebexServer);
   });
 }

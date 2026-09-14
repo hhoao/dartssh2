@@ -30,6 +30,8 @@ void main() {
       client.handlePacket(closeMessage);
 
       await drainFuture;
-    }, timeout: const Timeout(Duration(seconds: 5)));
+    },
+        timeout: const Timeout(Duration(seconds: 5)),
+        skip: skipWithoutRebexServer);
   });
 }

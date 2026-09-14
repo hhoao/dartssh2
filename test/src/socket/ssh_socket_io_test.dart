@@ -7,6 +7,8 @@ library;
 import 'package:dartssh2/dartssh2.dart';
 import 'package:test/test.dart';
 
+import '../../test_utils.dart';
+
 void main() {
   group('SSHSocket', () {
     test('can establish tcp connections', () async {
@@ -14,6 +16,6 @@ void main() {
       final firstPacket = await socket.stream.first;
       expect(firstPacket, isNotEmpty);
       await socket.close();
-    });
+    }, skip: skipWithoutRebexServer);
   });
 }

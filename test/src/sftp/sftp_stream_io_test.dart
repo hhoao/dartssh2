@@ -142,7 +142,6 @@ void main() {
     setUp(() async {
       client = await getTestClient();
     });
-
     tearDown(() async {
       client.close();
       await client.done;
@@ -201,7 +200,7 @@ void main() {
       });
     });
      */
-  }, tags: ['integration']);
+  }, tags: ['integration'], skip: skipWithoutRebexServer);
 }
 
 class _SftpTestHarness {

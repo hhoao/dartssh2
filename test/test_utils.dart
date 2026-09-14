@@ -50,6 +50,19 @@ Object? get skipWithoutLocalSshd => hasLocalSshd
     : 'needs the local OpenSSH server, start it with '
         'tool/start_test_sshd.sh or set DARTSSH2_LOCAL_SSHD=1';
 
+/// Whether the third-party SSH test servers (test.rebex.net) may be
+/// contacted. Unlike the local OpenSSH server, these are someone else's
+/// machines: they rate-limit parallel connections per IP, so a full suite
+/// run under load flakes with connection-refused handshakes. Opt in
+/// explicitly.
+bool get hasRebexServer => Platform.environment['DARTSSH2_REBEX'] == '1';
+
+/// Reason to skip a test when the third-party test servers are not enabled.
+Object? get skipWithoutRebexServer => hasRebexServer
+    ? null
+    : 'needs the third-party SSH test server test.rebex.net, which '
+        'rate-limits parallel connections; set DARTSSH2_REBEX=1 to run it';
+
 /// A client connected to the OpenSSH server started by CI.
 Future<SSHClient> getLocalClient({
   SSHAlgorithms algorithms = const SSHAlgorithms(),

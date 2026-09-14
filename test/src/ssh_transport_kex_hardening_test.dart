@@ -653,6 +653,39 @@ void main() {
       transport.close();
     });
   });
+
+  group('disconnect flush timeout (final-review finding 5)', () {
+    test('a stalled disconnect flush cannot hold the socket open forever',
+        () async {
+      // A wire DISCONNECT was sent just before closeWithError and its
+      // flush is pending — but the peer stopped reading, so flush() will
+      // never complete. The teardown must not wait on it indefinitely:
+      // the timeout bound collapses into the same socket.destroy.
+      final socket = _StalledFlushSocket();
+      final transport = SSHTransport(
+        socket,
+        onMessage: (_) => true,
+      );
+
+      setPrivate(
+        transport,
+        '_pendingDisconnectFlush',
+        socket.flush(), // never completes
+      );
+      expect(socket.destroyed, isFalse);
+
+      final tornDown = expectLater(
+        transport.done,
+        throwsA(isA<SSHStateError>()),
+      );
+      transport.closeWithError(SSHStateError('stimulus'));
+      await tornDown;
+
+      // Well past the 500 ms bound: the destroy must have landed anyway.
+      await Future<void>.delayed(const Duration(seconds: 2));
+      expect(socket.destroyed, isTrue);
+    });
+  });
 }
 
 Future<void> _pumpUntil(bool Function() condition) async {
@@ -701,6 +734,22 @@ class _CaptureSSHSocket implements SSHSocket {
 
   @override
   Future<void> flush() async {}
+}
+
+/// A socket whose peer stopped reading: every flush() stays pending
+/// forever, and teardowns are recorded.
+class _StalledFlushSocket extends _CaptureSSHSocket {
+  final _stalledFlush = Completer<void>();
+  var destroyed = false;
+
+  @override
+  Future<void> flush() => _stalledFlush.future;
+
+  @override
+  void destroy() {
+    destroyed = true;
+    super.destroy();
+  }
 }
 
 class _CaptureSink implements StreamSink<List<int>> {

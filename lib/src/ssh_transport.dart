@@ -666,9 +666,13 @@ class SSHTransport {
     if (disconnectFlush != null) {
       // A wire DISCONNECT was sent just before this error (a strict-kex
       // violation): let it reach the peer before the socket is destroyed.
+      // A peer that stopped reading keeps flush() pending forever, so the
+      // wait is bounded — past the timeout the teardown collapses into the
+      // same socket.destroy instead of holding the transport alive.
       unawaited(
         disconnectFlush
             .then((_) {}, onError: (Object _) {})
+            .timeout(_disconnectFlushTimeout, onTimeout: () {})
             .whenComplete(socket.destroy),
       );
     } else {
@@ -1734,6 +1738,11 @@ class SSHTransport {
   /// finish before destroying the socket, or `null` when no disconnect is
   /// pending.
   Future<void>? _pendingDisconnectFlush;
+
+  /// How long [closeWithError] waits for a pending disconnect flush before
+  /// destroying the socket anyway: a peer that stopped reading keeps
+  /// `flush()` pending forever, and the teardown must stay bounded.
+  static const _disconnectFlushTimeout = Duration(milliseconds: 500);
 
   /// Handles a message that is not valid during the current key exchange.
   ///

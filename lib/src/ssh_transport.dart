@@ -388,6 +388,20 @@ class SSHTransport {
   /// `dispatch_protocol_error`, and so does the transport.
   final List<Uint8List> _rekeyPendingInboundPackets = [];
 
+  /// Total bytes currently queued in [_rekeyPendingInboundPackets].
+  var _rekeyPendingInboundBytes = 0;
+
+  /// The most inbound data the re-key queue may hold. While an exchange is
+  /// in flight every session message queues here *before* the channel layer
+  /// runs, so the channel receive-window enforcement is suspended for as
+  /// long as the queue grows — a peer that sends a KEXINIT, stalls the
+  /// exchange, and floods would buffer memory without limit. The cap is four
+  /// times a granted channel receive window (tp_sshd grants 2 MiB), enough
+  /// for a batch of racing packets from several busy channels while cutting
+  /// the flood off at a bound. Overflow tears the connection down the same
+  /// way a peer that overruns a channel window past its grace margin does.
+  static const _maxRekeyPendingInboundBytes = 8 * 1024 * 1024;
+
   /// Completes when the key exchange a [rekey] call is waiting on reaches
   /// SSH_MSG_NEWKEYS, or with an error if the connection ends first.
   ///
@@ -1660,8 +1674,7 @@ class SSHTransport {
             // queue it and re-dispatch after NEWKEYS, the incoming twin of
             // the [_rekeyPendingPackets] send queue. See
             // [_rekeyPendingInboundPackets] for the OpenSSH reference.
-            _rekeyPendingInboundPackets.add(Uint8List.fromList(message));
-            return;
+            return _queueRekeyPendingInbound(message);
           }
           return _handleUnexpectedKexMessage(messageId);
         }
@@ -1734,6 +1747,45 @@ class SSHTransport {
       );
     }
     _sendUnimplemented(messageId);
+  }
+
+  /// Queues an inbound session message that raced into a re-key's exchange
+  /// window, or tears the connection down once the queue would hold more
+  /// than [_maxRekeyPendingInboundBytes].
+  ///
+  /// The queue exists for the brief overlap of racing packets with the
+  /// exchange — but a peer that stalls the exchange (its KEXINIT is out,
+  /// its NEWKEYS never comes) keeps every further session message ahead of
+  /// the channel layer, where the receive-window enforcement lives, so the
+  /// flood would buffer without limit. Past the cap the peer is ignoring
+  /// flow control exactly like one that overruns a channel window past its
+  /// grace margin, and gets the same answer: a wire `DISCONNECT(2)` so it
+  /// learns why, then teardown.
+  void _queueRekeyPendingInbound(Uint8List message) {
+    if (_rekeyPendingInboundBytes + message.length >
+        _maxRekeyPendingInboundBytes) {
+      final disconnect = SSH_Message_Disconnect(
+        reasonCode: SSHDisconnectReason.protocolError.code,
+        description: 'rekey inbound queue overflow',
+      );
+      try {
+        sendPacket(disconnect.encode());
+        printTrace?.call('-> $socket: $disconnect');
+        _pendingDisconnectFlush = socket.flush();
+      } on Object {
+        // The transport is already unusable; the teardown below still ends
+        // the connection.
+      }
+      closeWithError(
+        SSHStateError(
+          'Rekey inbound queue overflow: the peer kept sending while the '
+          'key exchange was stalled',
+        ),
+      );
+      return;
+    }
+    _rekeyPendingInboundBytes += message.length;
+    _rekeyPendingInboundPackets.add(Uint8List.fromList(message));
   }
 
   /// Reports an unrecognized message using the rejected packet's sequence
@@ -2166,9 +2218,12 @@ class SSHTransport {
 
     // Re-dispatch the non-KEX messages that raced into the exchange window
     // (see [_rekeyPendingInboundPackets]) — after the keys are applied and
-    // the queued outgoing traffic is flushed, in their arrival order.
+    // the queued outgoing traffic is flushed, in their arrival order. The
+    // byte budget is restored with the queue so the next rekey starts from
+    // zero, not from what this round admitted.
     final pendingInbound = List<Uint8List>.from(_rekeyPendingInboundPackets);
     _rekeyPendingInboundPackets.clear();
+    _rekeyPendingInboundBytes = 0;
     for (final payload in pendingInbound) {
       await _handleMessage(payload);
     }

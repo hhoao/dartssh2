@@ -9,6 +9,7 @@ import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:dartssh2/src/message/msg_channel.dart';
+import 'package:dartssh2/src/message/msg_disconnect.dart';
 import 'package:dartssh2/src/message/msg_kex.dart';
 import 'package:dartssh2/src/message/msg_service.dart';
 import 'package:dartssh2/src/message/msg_unimplemented.dart';
@@ -91,6 +92,23 @@ void main() {
       );
       if (SSHMessage.readMessageId(payload) ==
           SSH_Message_Unimplemented.messageId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Whether the transport wrote an SSH_MSG_DISCONNECT to [socket].
+  bool sentDisconnect(_CaptureSSHSocket socket) {
+    for (final packet in socket.packets.skip(1)) {
+      final paddingLength = SSHPacket.readPaddingLength(packet);
+      final payload = Uint8List.sublistView(
+        packet,
+        SSHPacket.headerLength,
+        packet.length - paddingLength,
+      );
+      if (SSHMessage.readMessageId(payload) ==
+          SSH_Message_Disconnect.messageId) {
         return true;
       }
     }
@@ -298,6 +316,144 @@ void main() {
 
       expect(received, isEmpty);
       expect(sentUnimplemented(socket), isTrue);
+
+      transport.close();
+    });
+  });
+
+  group('rekey inbound queue cap (final-review finding 1)', () {
+    test('a channel-data flood during a stalled rekey tears the connection '
+        'down at the cap', () async {
+      // Hostile-peer shape: KEXINIT out, the exchange stalled (their
+      // NEWKEYS never arrives), channel data flooding in. The queue must
+      // not grow without limit — at the cap the connection goes down with
+      // an error, mirroring the channel-window grace teardown.
+      final socket = _CaptureSSHSocket();
+      final received = <int>[];
+      final transport = SSHTransport(
+        socket,
+        onMessage: (payload) {
+          received.add(SSHMessage.readMessageId(payload));
+          return true;
+        },
+      );
+
+      midRekey(transport);
+      prepareKeys(transport);
+
+      // Quarter-of-the-cap channel data payloads: four fit, the fifth
+      // overflows the 8 MiB bound.
+      final chunk = Uint8List(2 * 1024 * 1024 - 4096);
+      for (var i = 0; i < 4; i++) {
+        await invokePrivate(transport, '_handleMessage', [
+          SSH_Message_Channel_Data(recipientChannel: 0, data: chunk).encode(),
+        ]);
+      }
+      expect(transport.isClosed, isFalse);
+
+      // Attached before the trigger: the done future completes with the
+      // error the moment the cap trips, and an unlistened error future
+      // would surface as an unhandled async error at the next await.
+      final tornDown = expectLater(
+        transport.done,
+        throwsA(isA<SSHStateError>()),
+      );
+
+      await invokePrivate(transport, '_handleMessage', [
+        SSH_Message_Channel_Data(recipientChannel: 0, data: chunk).encode(),
+      ]);
+
+      await tornDown;
+      expect(transport.isClosed, isTrue);
+      // The peer learns why: a wire DISCONNECT preceded the teardown.
+      expect(sentDisconnect(socket), isTrue);
+      // None of the flood ever reached the channel layer.
+      expect(received, isEmpty);
+    });
+
+    test('a queue at the cap boundary still drains normally after NEWKEYS',
+        () async {
+      // The cap must not be so tight that healthy racing traffic — a full
+      // granted channel window's worth, the size the cap is a multiple of —
+      // is cut off.
+      final socket = _CaptureSSHSocket();
+      final received = <int>[];
+      final transport = SSHTransport(
+        socket,
+        onMessage: (payload) {
+          received.add(SSHMessage.readMessageId(payload));
+          return true;
+        },
+      );
+
+      midRekey(transport);
+      prepareKeys(transport);
+
+      final chunk = Uint8List(2 * 1024 * 1024 - 4096);
+      for (var i = 0; i < 4; i++) {
+        await invokePrivate(transport, '_handleMessage', [
+          SSH_Message_Channel_Data(recipientChannel: 0, data: chunk).encode(),
+        ]);
+      }
+      expect(transport.isClosed, isFalse);
+      expect(sentDisconnect(socket), isFalse);
+
+      await invokePrivate(transport, '_handleMessageNewKeys', [
+        SSH_Message_NewKeys().encode(),
+      ]);
+
+      expect(transport.isClosed, isFalse);
+      expect(
+        received,
+        everyElement(SSH_Message_Channel_Data.messageId),
+      );
+      expect(received, hasLength(4));
+
+      transport.close();
+    });
+
+    test('the byte budget is restored after a completed rekey', () async {
+      // Two back-to-back rekeys each get the full budget: the drain after
+      // NEWKEYS must reset the accounting, not leak it across exchanges.
+      final socket = _CaptureSSHSocket();
+      final received = <int>[];
+      final transport = SSHTransport(
+        socket,
+        onMessage: (payload) {
+          received.add(SSHMessage.readMessageId(payload));
+          return true;
+        },
+      );
+
+      midRekey(transport);
+      prepareKeys(transport);
+
+      final chunk = Uint8List(2 * 1024 * 1024 - 4096);
+      for (var i = 0; i < 4; i++) {
+        await invokePrivate(transport, '_handleMessage', [
+          SSH_Message_Channel_Data(recipientChannel: 0, data: chunk).encode(),
+        ]);
+      }
+      await invokePrivate(transport, '_handleMessageNewKeys', [
+        SSH_Message_NewKeys().encode(),
+      ]);
+      expect(received, hasLength(4));
+
+      // A second rekey with the same flood must queue it all again instead
+      // of tripping the previous round's accounting.
+      midRekey(transport);
+      for (var i = 0; i < 4; i++) {
+        await invokePrivate(transport, '_handleMessage', [
+          SSH_Message_Channel_Data(recipientChannel: 0, data: chunk).encode(),
+        ]);
+      }
+      expect(transport.isClosed, isFalse);
+      expect(sentDisconnect(socket), isFalse);
+
+      await invokePrivate(transport, '_handleMessageNewKeys', [
+        SSH_Message_NewKeys().encode(),
+      ]);
+      expect(received, hasLength(8));
 
       transport.close();
     });

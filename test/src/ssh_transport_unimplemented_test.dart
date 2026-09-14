@@ -248,7 +248,23 @@ void main() {
         invokeHandleMessage(transport, Uint8List.fromList([255])),
         throwsA(isA<SSHHandshakeError>()),
       );
-      expect(socket.packets, isEmpty);
+      // The violation is answered on the wire before the teardown: a
+      // DISCONNECT(2) naming the strict-key-exchange violation, the way
+      // OpenSSH's kex_protocol_error does (RFC 9142 §3.2) — not a bare
+      // TCP close.
+      expect(socket.packets, hasLength(1));
+      final payload = Uint8List.sublistView(
+        socket.packets.single,
+        SSHPacket.headerLength,
+        socket.packets.single.length -
+            SSHPacket.readPaddingLength(socket.packets.single),
+      );
+      final disconnect = SSH_Message_Disconnect.decode(payload);
+      expect(disconnect.reasonCode, 2);
+      expect(
+        disconnect.description.toLowerCase(),
+        contains('strict kex violation'),
+      );
 
       await transport.close();
     });

@@ -621,7 +621,19 @@ class SSHTransport {
     _socketSubscription = null;
     _doneCompleter.completeError(error, stackTrace ?? StackTrace.current);
     _failPendingRekey(error, stackTrace ?? StackTrace.current);
-    socket.destroy();
+    final disconnectFlush = _pendingDisconnectFlush;
+    _pendingDisconnectFlush = null;
+    if (disconnectFlush != null) {
+      // A wire DISCONNECT was sent just before this error (a strict-kex
+      // violation): let it reach the peer before the socket is destroyed.
+      unawaited(
+        disconnectFlush
+            .then((_) {}, onError: (Object _) {})
+            .whenComplete(socket.destroy),
+      );
+    } else {
+      socket.destroy();
+    }
   }
 
   /// Force flush any buffered outgoing data to the socket.
@@ -1549,10 +1561,7 @@ class SSHTransport {
         _isFirstKex &&
         _kexInProgress &&
         _isForbiddenDuringStrictKex(messageId)) {
-      throw SSHHandshakeError(
-        'Strict key exchange violation: message $messageId received during '
-        'key exchange',
-      );
+      _failStrictKex('message $messageId received during key exchange');
     }
 
     switch (messageId) {
@@ -1624,6 +1633,44 @@ class SSHTransport {
     }
   }
 
+  /// Answers a strict key exchange violation (RFC 9142 §3.2) the way
+  /// OpenSSH does (kex.c:kex_protocol_error -> sshpkt_disconnect): a wire
+  /// `SSH_MSG_DISCONNECT(2, "strict KEX violation: <detail>")` before the
+  /// connection is torn down, so the peer learns why the connection died
+  /// instead of seeing an unexplained TCP close. Both roles send it, like
+  /// OpenSSH's client and server.
+  ///
+  /// Every caller is inside the initial key exchange (`_isFirstKex` only
+  /// turns false once the first NEWKEYS has applied keys), so the transport
+  /// is still unencrypted and the DISCONNECT goes out in the clear. It also
+  /// bypasses the rekey buffer (its message id, 1, is in
+  /// [_shouldBypassRekeyBuffer]'s transport range).
+  ///
+  /// The disconnect is flushed before the teardown destroys the socket —
+  /// destroy drops unflushed writes, and a queued-but-undelivered disconnect
+  /// would be exactly the unexplained close this is fixing — so the flush is
+  /// handed to [closeWithError], which runs once this throw propagates.
+  Never _failStrictKex(String detail) {
+    final message = SSH_Message_Disconnect(
+      reasonCode: SSHDisconnectReason.protocolError.code,
+      description: 'strict KEX violation: $detail',
+    );
+    try {
+      sendPacket(message.encode());
+      printTrace?.call('-> $socket: $message');
+      _pendingDisconnectFlush = socket.flush();
+    } on Object {
+      // The transport is already unusable; the handshake error below still
+      // tears the connection down.
+    }
+    throw SSHHandshakeError('Strict key exchange violation: $detail');
+  }
+
+  /// The flush of a just-sent wire DISCONNECT that [closeWithError] must let
+  /// finish before destroying the socket, or `null` when no disconnect is
+  /// pending.
+  Future<void>? _pendingDisconnectFlush;
+
   /// Handles a message that is not valid during the current key exchange.
   ///
   /// OpenSSH disconnects for unexpected messages during the initial strict
@@ -1631,9 +1678,8 @@ class SSHTransport {
   /// message as unimplemented.
   void _handleUnexpectedKexMessage(int messageId) {
     if (_strictKex && _isFirstKex) {
-      throw SSHHandshakeError(
-        'Strict key exchange violation: unexpected message $messageId '
-        'received during key exchange',
+      _failStrictKex(
+        'unexpected message $messageId received during key exchange',
       );
     }
     _sendUnimplemented(messageId);
@@ -1680,8 +1726,8 @@ class SSHTransport {
     if (!_strictKex) return;
 
     if (_remotePacketSN.value != 0) {
-      throw SSHHandshakeError(
-        'Strict key exchange violation: KEXINIT was not the first packet '
+      _failStrictKex(
+        'KEXINIT was not the first packet '
         '(sequence number ${_remotePacketSN.value})',
       );
     }

@@ -10,7 +10,10 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:dartssh2/src/message/msg_debug.dart';
 import 'package:dartssh2/src/message/msg_ext_info.dart';
 import 'package:dartssh2/src/message/msg_ignore.dart';
+import 'package:dartssh2/src/message/msg_disconnect.dart';
 import 'package:dartssh2/src/message/msg_kex.dart';
+import 'package:dartssh2/src/message/msg_service.dart';
+import 'package:dartssh2/src/ssh_message.dart';
 import 'package:dartssh2/src/message/msg_unimplemented.dart';
 import 'package:dartssh2/src/ssh_packet.dart';
 import 'package:test/test.dart';
@@ -297,6 +300,150 @@ void main() {
         transport.close();
       });
     }
+  });
+
+  group('Strict kex violations carry a wire DISCONNECT (RFC 9142 §3.2)', () {
+    /// Decodes the first SSH_MSG_DISCONNECT the transport wrote to [socket],
+    /// or `null` when none was sent. Packet 0 is the version banner.
+    SSH_Message_Disconnect? sentDisconnect(_CaptureSSHSocket socket) {
+      for (final packet in socket.packets.skip(1)) {
+        final paddingLength = SSHPacket.readPaddingLength(packet);
+        final payload = Uint8List.sublistView(
+          packet,
+          SSHPacket.headerLength,
+          packet.length - paddingLength,
+        );
+        if (SSHMessage.readMessageId(payload) ==
+            SSH_Message_Disconnect.messageId) {
+          return SSH_Message_Disconnect.decode(payload);
+        }
+      }
+      return null;
+    }
+
+    test('a forbidden transport message draws DISCONNECT(2) before the throw',
+        () async {
+      final socket = _CaptureSSHSocket();
+      final transport = SSHTransport(socket);
+
+      setPrivate(transport, '_strictKex', true);
+      setPrivate(transport, '_kexInProgress', true);
+
+      await expectLater(
+        invokePrivate(transport, '_handleMessage', [
+          SSH_Message_Ignore.empty().encode(),
+        ]),
+        throwsA(isA<SSHHandshakeError>()),
+      );
+
+      final disconnect = sentDisconnect(socket);
+      expect(disconnect, isNotNull);
+      expect(disconnect!.reasonCode, 2); // SSH_DISCONNECT_PROTOCOL_ERROR
+      expect(
+        disconnect.description.toLowerCase(),
+        contains('strict kex violation'),
+      );
+
+      transport.close();
+    });
+
+    test('a non-KEX dispatch-range message draws DISCONNECT(2) too', () async {
+      // A19's stimulus: SERVICE_REQUEST (type 5) between KEXINIT and
+      // NEWKEYS. It is outside the strict-kex forbidden range (2-4), so it
+      // reaches _handleUnexpectedKexMessage's strict branch instead.
+      final socket = _CaptureSSHSocket();
+      final transport = SSHTransport(socket);
+
+      setPrivate(transport, '_strictKex', true);
+      setPrivate(transport, '_kexInProgress', true);
+
+      await expectLater(
+        invokePrivate(transport, '_handleMessage', [
+          SSH_Message_Service_Request('ssh-userauth').encode(),
+        ]),
+        throwsA(isA<SSHHandshakeError>()),
+      );
+
+      final disconnect = sentDisconnect(socket);
+      expect(disconnect, isNotNull);
+      expect(disconnect!.reasonCode, 2);
+      expect(
+        disconnect.description.toLowerCase(),
+        contains('strict kex violation'),
+      );
+
+      transport.close();
+    });
+
+    test('the server role emits the same DISCONNECT', () async {
+      // OpenSSH's client and server both send the disconnect; pin that the
+      // emit is role-agnostic.
+      final socket = _CaptureSSHSocket();
+      final transport = SSHTransport(socket, isServer: true);
+
+      setPrivate(transport, '_strictKex', true);
+      setPrivate(transport, '_kexInProgress', true);
+
+      await expectLater(
+        invokePrivate(transport, '_handleMessage', [
+          SSH_Message_Ignore.empty().encode(),
+        ]),
+        throwsA(isA<SSHHandshakeError>()),
+      );
+
+      expect(sentDisconnect(socket)?.reasonCode, 2);
+
+      transport.close();
+    });
+
+    test('a KEXINIT that is not the first packet draws DISCONNECT(2)',
+        () async {
+      // _negotiateStrictKex's precondition: the first KEXINIT must be the
+      // very first packet.
+      final socket = _CaptureSSHSocket();
+      final transport = SSHTransport(socket);
+
+      setPrivate(transport, '_kexInProgress', true);
+      setPrivate(transport, '_sentKexInit', true);
+      setSequenceValue(transport, '_remotePacketSN', 1);
+
+      await expectLater(
+        invokePrivate(transport, '_handleMessageKexInit', [
+          serverKexInit(
+            extraKexAlgorithms: const ['kex-strict-s-v00@openssh.com'],
+          ).encode(),
+        ]),
+        throwsA(isA<SSHHandshakeError>()),
+      );
+
+      final disconnect = sentDisconnect(socket);
+      expect(disconnect, isNotNull);
+      expect(disconnect!.reasonCode, 2);
+      expect(
+        disconnect.description.toLowerCase(),
+        contains('strict kex violation'),
+      );
+
+      transport.close();
+    });
+
+    test('no DISCONNECT without strict kex: the reply stays UNIMPLEMENTED',
+        () async {
+      final socket = _CaptureSSHSocket();
+      final transport = SSHTransport(socket);
+
+      setPrivate(transport, '_strictKex', false);
+      setPrivate(transport, '_kexInProgress', true);
+
+      await invokePrivate(transport, '_handleMessage', [
+        SSH_Message_Service_Request('ssh-userauth').encode(),
+      ]);
+
+      expect(sentDisconnect(socket), isNull);
+      expect(socket.packets, isNotEmpty);
+
+      transport.close();
+    });
   });
 
   group('Strict key exchange sequence numbers', () {

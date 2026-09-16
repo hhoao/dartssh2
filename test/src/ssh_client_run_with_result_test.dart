@@ -205,18 +205,65 @@ void main() {
       final stdin = Uint8List.fromList(utf8.encode('hello-stdin'));
 
       final resultFuture = client.runWithResult('bash -s', stdin: stdin);
-      await Future<void>.delayed(Duration.zero);
+      for (var i = 0; i < 40; i++) {
+        await Future<void>.delayed(Duration.zero);
+        if (harness.sentMessages.whereType<SSH_Message_Channel_EOF>().isNotEmpty) {
+          break;
+        }
+      }
 
       final data = harness.sentMessages.whereType<SSH_Message_Channel_Data>();
       expect(
         data.any((m) => utf8.decode(m.data) == 'hello-stdin'),
         isTrue,
       );
+      var dataIndex = -1;
+      for (var i = 0; i < harness.sentMessages.length; i++) {
+        final message = harness.sentMessages[i];
+        if (message is SSH_Message_Channel_Data &&
+            utf8.decode(message.data) == 'hello-stdin') {
+          dataIndex = i;
+          break;
+        }
+      }
+      final eofIndex = harness.sentMessages.indexWhere(
+        (m) => m is SSH_Message_Channel_EOF,
+      );
+      expect(eofIndex, greaterThan(dataIndex));
 
       harness.sendExitStatus(0);
       harness.close();
       final result = await resultFuture;
       expect(result.exitCode, 0);
+
+      harness.dispose();
+      client.close();
+    });
+
+    test('splits stdin larger than 32KB into multiple CHANNEL_DATA', () async {
+      final harness = _SessionHarness(remoteMaximumPacketSize: 32 * 1024);
+      final client = _TestSSHClient(() async => harness.session);
+      final stdin = Uint8List(40 * 1024);
+
+      final resultFuture = client.runWithResult('bash -s', stdin: stdin);
+      for (var i = 0; i < 40; i++) {
+        await Future<void>.delayed(Duration.zero);
+        if (harness.sentMessages.whereType<SSH_Message_Channel_Data>().length >
+            1) {
+          break;
+        }
+      }
+
+      final data = harness.sentMessages.whereType<SSH_Message_Channel_Data>();
+      expect(data.length, greaterThan(1));
+      expect(
+        data.fold<int>(0, (n, m) => n + m.data.length),
+        stdin.length,
+      );
+
+      harness.sendExitStatus(0);
+      harness.close();
+      expect((await resultFuture).exitCode, 0);
 
       harness.dispose();
       client.close();
@@ -265,13 +312,17 @@ class _TestSSHClient extends SSHClient {
 }
 
 class _SessionHarness {
-  _SessionHarness({Object? stdoutError, Object? stderrError}) {
+  _SessionHarness({
+    Object? stdoutError,
+    Object? stderrError,
+    int remoteMaximumPacketSize = 1024 * 1024,
+  }) {
     _controller = SSHChannelController(
       localId: 1,
       localMaximumPacketSize: 1024 * 1024,
       localInitialWindowSize: 1024 * 1024,
       remoteId: 2,
-      remoteMaximumPacketSize: 1024 * 1024,
+      remoteMaximumPacketSize: remoteMaximumPacketSize,
       remoteInitialWindowSize: 1024 * 1024,
       sendMessage: sentMessages.add,
     );

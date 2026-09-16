@@ -199,6 +199,29 @@ void main() {
       client.close();
     });
 
+    test('writes stdin then closes it before waiting for exit', () async {
+      final harness = _SessionHarness();
+      final client = _TestSSHClient(() async => harness.session);
+      final stdin = Uint8List.fromList(utf8.encode('hello-stdin'));
+
+      final resultFuture = client.runWithResult('bash -s', stdin: stdin);
+      await Future<void>.delayed(Duration.zero);
+
+      final data = harness.sentMessages.whereType<SSH_Message_Channel_Data>();
+      expect(
+        data.any((m) => utf8.decode(m.data) == 'hello-stdin'),
+        isTrue,
+      );
+
+      harness.sendExitStatus(0);
+      harness.close();
+      final result = await resultFuture;
+      expect(result.exitCode, 0);
+
+      harness.dispose();
+      client.close();
+    });
+
     test('run() returns combined output bytes', () async {
       final harness = _SessionHarness();
       final client = _TestSSHClient(() async {

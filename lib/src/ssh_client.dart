@@ -832,6 +832,7 @@ class SSHClient {
     bool stdout = true,
     bool stderr = true,
     Map<String, String>? environment,
+    List<int>? stdin,
   }) async {
     final session = await execute(
       command,
@@ -869,12 +870,17 @@ class SSHClient {
       cancelOnError: true,
     );
 
+    if (stdin != null && stdin.isNotEmpty) {
+      session.write(Uint8List.fromList(stdin));
+    }
+    final stdinClosed = session.stdin.close();
+
     // Both futures must be awaited together. Awaiting them one after the other
     // would leave the second one without an error handler until the first one
     // completes, turning an error on that stream into an uncaught error.
     try {
       await Future.wait(
-        [stdoutDone.future, stderrDone.future],
+        [stdoutDone.future, stderrDone.future, stdinClosed],
         eagerError: true,
       );
       await session.done;
